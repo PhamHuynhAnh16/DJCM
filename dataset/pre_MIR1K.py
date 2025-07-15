@@ -6,10 +6,10 @@ import librosa
 import soundfile as sf
 import shutil
 
-df_info = pd.read_csv(r'D:\ICASSP_2024\SVSDT\dataset\MIR1K\info.csv')
-path_in = r'D:\联合模型\Data\MIR-1K\Wavfile'
-path_label_in = r'D:\联合模型\Data\MIR-1K\PitchLabel'
-path_out = r'D:\ICASSP_2024\SVSDT\dataset\MIR1K'
+df_info = pd.read_csv(r"F:\github\DJCM\dataset\MIR1K\info.csv")
+path_in = r"F:\dataset\MIR-1K\Wavfile"
+path_label_in = r"F:\dataset\MIR-1K\PitchLabel"
+path_out = r"F:\dataset\dataset"
 
 for _, row in tqdm(df_info.iterrows()):
     filename, _, split = row[0], row[1], row[2]

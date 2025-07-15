@@ -8,6 +8,10 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
+
+# import sys
+# sys.path.append(os.getcwd())
+
 from src import MIR1K, cycle, summary, DJCM, FL, mae
 from evaluate import evaluate
 
@@ -28,17 +32,17 @@ def train(weight_svs):
 
     pitch_th = 0.5
     learning_rate = 5e-4
-    batch_size = 16
+    batch_size = 7
     clip_grad_norm = 3
     learning_rate_decay_rate = 0.95
     learning_rate_decay_epochs = 5
-    train_epochs = 250
-    early_stop_epochs = 10
+    train_epochs = 300
+    early_stop_epochs = 50
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # path, hop_length, sequence_length = None, groups = None
-    train_dataset = MIR1K(path='./dataset/MIR1K', hop_length=hop_length, groups=['train'], sequence_length=seq_l)
+    train_dataset = MIR1K(path=r"F:\dataset\dataset", hop_length=hop_length, groups=['train'], sequence_length=seq_l)
     print('train nums:', len(train_dataset))
-    valid_dataset = MIR1K(path='./dataset/MIR1K', hop_length=hop_length, groups=['test'], sequence_length=None)
+    valid_dataset = MIR1K(path=r"F:\dataset\dataset", hop_length=hop_length, groups=['test'], sequence_length=None)
     print('valid nums:', len(valid_dataset))
     data_loader = DataLoader(train_dataset, batch_size, shuffle=True)
     epoch_nums = len(data_loader)
@@ -58,9 +62,10 @@ def train(weight_svs):
         resume_iteration = 0
     else:
         model_path = os.path.join(logdir, f'model-{resume_iteration}.pt')
-        model = torch.load(model_path)
+        model = torch.load(model_path, weights_only=False)
+        model.train()
         optimizer = torch.optim.Adam(model.parameters(), learning_rate)
-        optimizer.load_state_dict(torch.load(os.path.join(logdir, 'last-optimizer-state.pt')))
+        optimizer.load_state_dict(torch.load(os.path.join(logdir, 'last-optimizer-state.pt'), weights_only=False))
 
     scheduler = StepLR(optimizer, step_size=learning_rate_decay_steps, gamma=learning_rate_decay_rate)
     summary(model)
