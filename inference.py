@@ -365,7 +365,7 @@ class DJCM_Inference:
             audio (np.ndarray): Audio features.
         """
 
-        with torch.no_grad():
+        with torch.inference_mode():
             audio = torch.from_numpy(audio).to(self.device)
             audio = audio.unsqueeze(0) if audio.dim() == 1 else audio
             audio = audio.unsqueeze(1)
