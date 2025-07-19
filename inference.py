@@ -343,13 +343,25 @@ class DJCM_Inference:
     Args:
         model_path (str): Path to the DJCM model file.
         device (str, torch.device, optional): Device to use for computation. Defaults to Cpu, which uses CUDA if available.
+        is_half (bool, optional): Use Half to save resources and speed up.
+        onnx (bool, optional): Using the ONNX model.
+        providers (list, optional): Providers of onnx model. default is CPUExecutionProvider.
     """
 
-    def __init__(self, model_path, device = "cpu", is_half = False):
-        model = DJCM(1, 1, 10, 1, SAMPLE_RATE // 10)
-        model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
-        model = model.to(device).eval()
-        self.model = model.half() if is_half else model.float()
+    def __init__(self, model_path, device = "cpu", is_half = False, onnx = False, providers = ["CPUExecutionProvider"]):
+        self.onnx = onnx
+        if self.onnx:
+            import onnxruntime as ort
+
+            sess_options = ort.SessionOptions()
+            sess_options.log_severity_level = 3
+            self.model = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
+        else:
+            model = DJCM(1, 1, 10, 1, SAMPLE_RATE // 10)
+            model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+            model = model.to(device).eval()
+            self.model = model.half() if is_half else model.float()
+
         self.device = device
         self.is_half = is_half
 
@@ -370,7 +382,14 @@ class DJCM_Inference:
             audio = audio.unsqueeze(0) if audio.dim() == 1 else audio
             audio = audio.unsqueeze(1)
 
-            pitch_pred = self.model(audio.half() if self.is_half else audio.float())
+            if self.onnx:
+                pitch_pred = torch.as_tensor(
+                    self.model.run([self.model.get_outputs()[0].name], {self.model.get_inputs()[0].name: audio.cpu().numpy().astype(np.float32)})[0], 
+                    device=self.device
+                )
+            else:
+                pitch_pred = self.model(audio.half() if self.is_half else audio.float())
+
             return pitch_pred
     
     def to_local_average_cents(self, salience, thred=0.05):
