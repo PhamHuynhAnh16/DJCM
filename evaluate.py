@@ -36,13 +36,13 @@ def evaluate(dataset, model, batch_size, hop_length, seq_l, device, path=None, p
         audio_v = data['audio_v'].to(device)
         pitch_label = data['pitch'].to(device)
 
-        audio_v_pred, pitch_pred = infer.inference(audio_m)
-        loss_svs = F.l1_loss(audio_v_pred, audio_v)
+        pitch_pred = infer.inference(audio_m)
+        # loss_svs = F.l1_loss(audio_v_pred, audio_v)
         loss_pitch = F.binary_cross_entropy(pitch_pred, pitch_label)
-        loss = loss_svs + loss_pitch
-        metrics['loss_svs'].append(loss_svs.item())
+        # loss = loss_svs + loss_pitch
+        # metrics['loss_svs'].append(loss_svs.item())
         metrics['loss_pe'].append(loss_pitch.item())
-        metrics['loss_total'].append(loss.item())
+        # metrics['loss_total'].append(loss.item())
 
         cents = to_local_average_cents(pitch_label.detach().cpu().numpy(), None, pitch_th)
         cents_pred = to_local_average_cents(pitch_pred.detach().cpu().numpy(), None, pitch_th)
@@ -64,19 +64,19 @@ def evaluate(dataset, model, batch_size, hop_length, seq_l, device, path=None, p
         metrics['VR'].append(vr)
 
         if path is not None:
-            sf.write(os.path.join(path, data['file'].replace('_v.wav', '.wav')), audio_v_pred.cpu().numpy(),
-                     samplerate=16000)
+            # sf.write(os.path.join(path, data['file'].replace('_v.wav', '.wav')), audio_v_pred.cpu().numpy(),
+                    #  samplerate=16000)
             df_pitch = pd.DataFrame(columns=['times', 'freqs', 'confi'])
             df_pitch['times'] = time_slice
             df_pitch['freqs'] = freqs_pred
             df_pitch['confi'] = torch.max(pitch_pred, dim=-1).values.numpy()
             df_pitch.to_csv(os.path.join(path, data['file'].replace('_v.wav', '.csv')), index=False)
-        sdr = calculate_sdr(audio_v, audio_v_pred).item()
-        sdr1 = calculate_sdr(audio_v, audio_m).item()
-        metrics['SDR'].append(sdr)
-        metrics['NSDR'].append(sdr - sdr1)
-        metrics['NSDR_W'].append(len(audio_v) * (sdr - sdr1))
-        metrics['LENGTH'].append(len(audio_v))
-        print(sdr, '\t', rpa, '\t', rca)
+        # sdr = calculate_sdr(audio_v, audio_v_pred).item()
+        # sdr1 = calculate_sdr(audio_v, audio_m).item()
+        # metrics['SDR'].append(sdr)
+        # metrics['NSDR'].append(sdr - sdr1)
+        # metrics['NSDR_W'].append(len(audio_v) * (sdr - sdr1))
+        # metrics['LENGTH'].append(len(audio_v))
+        # print(sdr, '\t', rpa, '\t', rca)
 
     return metrics
