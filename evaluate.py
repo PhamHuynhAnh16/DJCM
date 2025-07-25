@@ -33,7 +33,7 @@ def evaluate(dataset, model, batch_size, hop_length, seq_l, device, path=None, p
 
     for data in tqdm(dataset):
         audio_m = data['audio_m'].to(device)
-        audio_v = data['audio_v'].to(device)
+        # audio_v = data['audio_v'].to(device)
         pitch_label = data['pitch'].to(device)
 
         pitch_pred = infer.inference(audio_m)

@@ -58,7 +58,7 @@ def train():
 
     if resume_iteration is None:
         # in_channels, n_blocks, hop_length, latent_layers, seq_frames, seq='gru', seq_layers=1
-        model = DJCM(in_channels, n_blocks, hop_length, latent_layers, seq_frames)
+        model = DJCM(in_channels, n_blocks, latent_layers)
         model = nn.DataParallel(model).to(device)
         optimizer = torch.optim.Adam(model.parameters(), learning_rate)
         resume_iteration = 0
