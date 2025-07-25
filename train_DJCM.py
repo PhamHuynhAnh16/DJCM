@@ -17,7 +17,7 @@ from inference import DJCM
 from evaluate import evaluate
 
 
-def train(weight_svs):
+def train():
     weight_svs = 0
     alpha = 10
     gamma = 0
