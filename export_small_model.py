@@ -1,7 +1,7 @@
 import os
 import torch
 
-model_path = r"C:\Users\Pham Huynh Anh PC\Downloads\model-1998.pt"
+model_path = r"G:\Assets\DJCM-Model\model-8280.pt"
 output_path = "djcm.pt"
 fp16_model = True
 
@@ -12,8 +12,8 @@ for k, v in model.state_dict().items():
     name = k.replace("module.", "")
     new_state_dict[name] = v
 
-# del new_state_dict["to_wav.istft.ola_window"], new_state_dict["to_wav.istft.conv_real.weight"], new_state_dict["to_wav.istft.conv_imag.weight"]
-# del new_state_dict["to_spec.stft.conv_real.weight"], new_state_dict["to_spec.stft.conv_imag.weight"]
+del new_state_dict["to_wav.istft.ola_window"], new_state_dict["to_wav.istft.conv_real.weight"], new_state_dict["to_wav.istft.conv_imag.weight"]
+del new_state_dict["to_spec.stft.conv_real.weight"], new_state_dict["to_spec.stft.conv_imag.weight"]
 
 torch.save(new_state_dict, output_path)
 

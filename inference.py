@@ -37,9 +37,11 @@ class BiGRU(nn.Module):
         depth (int): Number of depths.
     """
 
-    def __init__(self, patch_size, channels, depth):
+    def __init__(self, image_size, patch_size, channels, depth):
         super(BiGRU, self).__init__()
+        image_width, image_height = image_size
         patch_width, patch_height = patch_size
+        assert image_height % patch_height == 0 and image_width % patch_width == 0
         patch_dim = channels * patch_height * patch_width
         self.to_patch_embedding = nn.Sequential(Rearrange('b c (w p1) (h p2) -> b (w h) (p1 p2 c)', p1=patch_width, p2=patch_height))
         self.gru = nn.GRU(patch_dim, patch_dim // 2, num_layers=depth, batch_first=True, bidirectional=True)
@@ -253,12 +255,12 @@ class PE_Decoder(nn.Module):
         gate (bool): Whether to use gating mechanisms in the decoder.
     """
 
-    def __init__(self, n_blocks, seq_layers=1, gate=False):
+    def __init__(self, n_blocks, seq_frames, seq_layers=1, gate=False):
         super(PE_Decoder, self).__init__()
         self.de_blocks = Decoder(n_blocks, gate)
         self.after_conv1 = ResEncoderBlock(32, 32, n_blocks, None, False)
         self.after_conv2 = nn.Conv2d(32, 1, (1, 1))
-        self.fc = nn.Sequential(BiGRU((1, WINDOW_LENGTH // 2), 1, seq_layers), nn.Linear(WINDOW_LENGTH // 2, N_CLASS), nn.Sigmoid())
+        self.fc = nn.Sequential(BiGRU((seq_frames, WINDOW_LENGTH // 2), (1, WINDOW_LENGTH // 2), 1, seq_layers), nn.Linear(WINDOW_LENGTH // 2, N_CLASS), nn.Sigmoid())
         init_layer(self.after_conv2)
 
     def forward(self, x, concat_tensors):
@@ -285,23 +287,24 @@ class Wav2Spec(nn.Module):
 
         bs, c, segment_samples = audio.shape
         audio = audio.reshape(bs * c, segment_samples)
+        stft_out = torch.stft(audio, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.window_size, window=self.window, return_complex=True, center=True, pad_mode='reflect')
 
-        fft = torch.stft(audio, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.window_size, window=self.window, center=True, return_complex=True, pad_mode='reflect')
-        magnitude = torch.sqrt(fft.real.pow(2) + fft.imag.pow(2))
+        mag = torch.abs(stft_out).permute(0, 2, 1)
+        mag = mag.reshape(bs, c, mag.shape[1], mag.shape[2])
 
-        return magnitude.unsqueeze(1).transpose(2, 3)
+        return mag
 
 class DJCM(nn.Module):
-    def __init__(self, in_channels, n_blocks, latent_layers, gate=False, seq_layers=1):
+    def __init__(self, in_channels, n_blocks, hop_length, latent_layers, seq_frames, gate=False, seq_layers=1):
         super(DJCM, self).__init__()
-        self.to_spec = Wav2Spec(HOP_SIZE, WINDOW_LENGTH)
+        self.to_spec = Wav2Spec(int(hop_length / 1000 * SAMPLE_RATE), WINDOW_LENGTH)
         self.bn = nn.BatchNorm2d(WINDOW_LENGTH // 2 + 1, momentum=0.01)
         self.svs_encoder = Encoder(in_channels, n_blocks)
         self.svs_latent = LatentBlocks(n_blocks, latent_layers)
         self.svs_decoder = SVS_Decoder(in_channels, n_blocks, gate)
         self.pe_encoder = Encoder(in_channels, n_blocks)
         self.pe_latent = LatentBlocks(n_blocks, latent_layers)
-        self.pe_decoder = PE_Decoder(n_blocks, seq_layers, gate)
+        self.pe_decoder = PE_Decoder(n_blocks, seq_frames, seq_layers, gate)
         init_bn(self.bn)
 
     def spec(self, x, spec_m):
@@ -354,7 +357,7 @@ class DJCM_Inference:
             sess_options.log_severity_level = 3
             self.model = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
         else:
-            model = DJCM(1, 1, 1)
+            model = DJCM(1, 1, 10, 1, SAMPLE_RATE // 10)
             model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
             model = model.to(device).eval()
             self.model = model.half() if is_half else model.float()
@@ -366,41 +369,28 @@ class DJCM_Inference:
         cents_mapping = 20 * np.arange(N_CLASS) + 1997.3794084376191
         self.cents_mapping = np.pad(cents_mapping, (4, 4))
 
-    def audio2hidden(self, audio, chunk_size=SAMPLE_RATE * 2):
+    def audio2hidden(self, audio):
         """
         Convert audio frequency to hidden representation.
 
         Args:
-            audio (torch.tensor): Audio features.
+            audio (np.ndarray): Audio features.
         """
 
-        with torch.no_grad():
-            output_chunks = []
-            n_frames = audio.shape[-1]
-            audio = F.pad(audio, (0, 32 * ((n_frames - 1) // 32 + 1) - n_frames), mode="reflect")
-            pad_frames = audio.shape[-1]
-    
-            for start in range(0, pad_frames, chunk_size):
-                end = min(start + chunk_size, pad_frames)
-                mel_chunk = audio[..., start:end]
-                assert mel_chunk.shape[-1] % 32 == 0, "chunk_size must be divisible by 32"
+        with torch.inference_mode():
+            audio = torch.from_numpy(audio).to(self.device)
+            audio = audio.unsqueeze(0) if audio.dim() == 1 else audio
+            audio = audio.unsqueeze(1)
 
-                out_chunk = self.model(mel_chunk)
+            if self.onnx:
+                pitch_pred = torch.as_tensor(
+                    self.model.run([self.model.get_outputs()[0].name], {self.model.get_inputs()[0].name: audio.cpu().numpy().astype(np.float32)})[0], 
+                    device=self.device
+                )
+            else:
+                pitch_pred = self.model(audio.half() if self.is_half else audio.float())
 
-                if self.onnx:
-                    out_chunk = torch.as_tensor(
-                        self.model.run([self.model.get_outputs()[0].name], {self.model.get_inputs()[0].name: audio.cpu().numpy().astype(np.float32)})[0], device=self.device
-                    )
-                else:
-                    out_chunk = self.model(
-                        audio.half() if self.is_half else audio.float()
-                    )
-
-                output_chunks.append(out_chunk)
-
-            hidden = torch.cat(output_chunks, dim=1)
-
-        return hidden[:, :n_frames]
+            return pitch_pred
     
     def to_local_average_cents(self, salience, thred=0.05):
         """
@@ -446,21 +436,49 @@ class DJCM_Inference:
     
     def infer_from_audio(self, audio, thred=0.03):
         """
-        Infers F0 from audio without overlap fading.
+        Infers F0 from audio.
 
         Args:
             audio (np.ndarray): Audio signal.
             thred (float, optional): Threshold for salience. Defaults to 0.03.
         """
 
-        audio = audio[:int(len(audio) / 160 * 159.208)] # fix length
-        audio = torch.from_numpy(audio).to(self.device)
-        audio = audio.unsqueeze(0) if audio.dim() == 1 else audio
+        segment_len, overlap = int(16000 * 5), int(16000 * 2.5) # 5 seconds and 2.5 seconds
+        segment_hop = segment_len - overlap
+        f0_out, weight_out, pos_out = [], [], []
 
-        hidden = self.audio2hidden(audio.unsqueeze(1))
-        f0 = self.decode(hidden.squeeze(0).cpu().numpy(), thred)
+        total_samples = len(audio)
+        for start in range(0, total_samples, segment_hop):
+            end = min(start + segment_len, total_samples)
+            segment = audio[start:end]
 
-        return f0
+            if len(segment) < 1024: continue
+
+            pitch_pred = self.audio2hidden(segment)
+            f0_seg = self.decode(pitch_pred.squeeze(0).cpu().numpy(), thred)
+
+            f_len = len(f0_seg)
+            weight = np.ones(f_len)
+
+            fade_len = int(overlap / HOP_SIZE)
+            fade_len = min(fade_len, f_len // 2)
+
+            if start != 0: weight[:fade_len] = np.linspace(0, 1, fade_len)
+            if end != total_samples: weight[-fade_len:] = np.linspace(1, 0, fade_len)
+
+            f0_out.append(f0_seg * weight)
+            weight_out.append(weight)
+            pos_out.append(int(start / HOP_SIZE))
+
+        total_f0 = np.zeros((total_samples // HOP_SIZE) + 1)
+        total_weight = np.zeros_like(total_f0)
+
+        for f0, w, pos in zip(f0_out, weight_out, pos_out):
+            total_f0[pos: pos + len(f0)] += f0
+            total_weight[pos:pos + len(w)] += w
+
+        result = total_f0 / (total_weight + 1e-8)
+        return result
     
     def infer_from_audio_with_pitch(self, audio, thred=0.03, f0_min=50, f0_max=1100):
         """
@@ -473,20 +491,53 @@ class DJCM_Inference:
             f0_max (float, int, optional): Maximum F0 threshold.
         """
 
-        f0 = self.infer_from_audio(audio, thred)
-        f0[(f0 < f0_min) | (f0 > f0_max)] = 0
+        segment_len, overlap = int(SAMPLE_RATE * 15), int(SAMPLE_RATE * 7.5) # 15 seconds and 7.5 seconds
+        segment_hop = segment_len - overlap
+        f0_out, weight_out, pos_out = [], [], []
 
-        return f0
+        total_samples = len(audio)
+        for start in range(0, total_samples, segment_hop):
+            end = min(start + segment_len, total_samples)
+            segment = audio[start:end]
+
+            if len(segment) < 1024: continue
+
+            pitch_pred = self.audio2hidden(segment)
+            f0_seg = self.decode(pitch_pred.squeeze(0).cpu().numpy(), thred)
+            f0_seg[(f0_seg < f0_min) | (f0_seg > f0_max)] = 0 
+
+            f_len = len(f0_seg)
+            weight = np.ones(f_len)
+
+            fade_len = int(overlap / HOP_SIZE)
+            fade_len = min(fade_len, f_len // 2)
+
+            if start != 0: weight[:fade_len] = np.linspace(0, 1, fade_len)
+            if end != total_samples: weight[-fade_len:] = np.linspace(1, 0, fade_len)
+
+            f0_out.append(f0_seg * weight)
+            weight_out.append(weight)
+            pos_out.append(int(start / HOP_SIZE))
+
+        total_f0 = np.zeros((total_samples // HOP_SIZE) + 1)
+        total_weight = np.zeros_like(total_f0)
+
+        for f0, w, pos in zip(f0_out, weight_out, pos_out):
+            total_f0[pos: pos + len(f0)] += f0
+            total_weight[pos:pos + len(w)] += w
+
+        result = total_f0 / (total_weight + 1e-8)
+        return result
 
 if __name__ == "__main__":
     import librosa
     import matplotlib.pyplot as plt
 
-    y, sr = librosa.load(r"C:\Users\Pham Huynh Anh PC\Downloads\test.wav", sr=SAMPLE_RATE, mono=True)
+    y, sr = librosa.load(r"C:\Users\Pham Huynh Anh PC\Downloads\Vocals.wav", sr=SAMPLE_RATE, mono=True)
 
     # https://huggingface.co/AnhP/DJCM-Test/resolve/main/djcm.pt
 
-    model = DJCM_Inference("djcm.pt", device="cpu")
+    model = DJCM_Inference(r"F:\github\djcm.pt", device="cpu")
     f0 = model.infer_from_audio(y, thred=0.03)
 
     with open("f0-djcm.txt", "w") as f:
