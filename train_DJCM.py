@@ -12,16 +12,13 @@ import numpy as np
 # import sys
 # sys.path.append(os.getcwd())
 
-from src import MIR1K, cycle, summary, FL # , mae
+from src import MIR1K, cycle, summary, bce #FL, mae
 from inference import DJCM
 from evaluate import evaluate
 
 
 def train():
-    weight_svs = 0
-    alpha = 10
-    gamma = 0
-    weight_pe = 2 - weight_svs
+    weight_pe = 2
     in_channels = 1
     n_blocks = 1
     latent_layers = 1
@@ -29,17 +26,16 @@ def train():
     hop_length = 20
     seq_frames = int(seq_l * 1000 / hop_length)
     logdir = 'runs/MIR1K_Cascade/' + 'nblocks' + str(n_blocks) + '_latent' + str(latent_layers) + '_frames' + str(seq_frames) \
-             + '_alpha' + str(alpha) + '_gamma' + str(gamma) + '_svs' + str(weight_svs) + '_pe' + str(weight_pe) + \
+             + '_pe' + str(weight_pe) + \
              '_gateT'
 
     pitch_th = 0.5
     learning_rate = 5e-4
-    batch_size = 7
+    batch_size = 13
     clip_grad_norm = 3
     learning_rate_decay_rate = 0.95
     learning_rate_decay_epochs = 5
     train_epochs = 300
-    early_stop_epochs = 50
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # path, hop_length, sequence_length = None, groups = None
     train_dataset = MIR1K(path=r"F:\dataset\dataset", hop_length=hop_length, groups=['train'], sequence_length=seq_l)
@@ -82,7 +78,8 @@ def train():
             out_pitch = model(audio_m)
 
             # loss_svs = mae(out_audio, audio_v)
-            loss_pitch = FL(out_pitch, pitch_label, alpha, gamma)
+            # loss_pitch = FL(out_pitch, pitch_label, alpha, gamma)
+            loss_pitch = bce(out_pitch, pitch_label)
             # weight_pe = loss_svs.item() / loss_pitch.item()
             loss_total = weight_pe * loss_pitch
 
@@ -129,9 +126,6 @@ def train():
                         torch.save(model, os.path.join(logdir, f'model-{i}.pt'))
                         torch.save(optimizer.state_dict(), os.path.join(logdir, 'last-optimizer-state.pt'))
                 model.train()
-
-            if i - it >= epoch_nums * early_stop_epochs:
-                break
     except KeyboardInterrupt:
         model.eval()
 
