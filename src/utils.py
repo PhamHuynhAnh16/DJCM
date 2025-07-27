@@ -2,7 +2,7 @@ import sys
 import numpy as np
 from functools import reduce
 from torch.nn.modules.module import _addindent
-from .constants import *
+
 
 def cycle(iterable):
     while True:
@@ -56,7 +56,7 @@ def summary(model, file=sys.stdout):
     return count
 
 
-def to_local_average_cents(salience, center=None, thred=0.05):
+def to_local_average_cents(salience, center=None, thred=0.0):
     """
     find the weighted average cents near the argmax bin
     """
@@ -64,7 +64,7 @@ def to_local_average_cents(salience, center=None, thred=0.05):
     if not hasattr(to_local_average_cents, 'cents_mapping'):
         # the bin number-to-cents mapping
         to_local_average_cents.cents_mapping = (
-                20 * np.arange(N_CLASS) + CONST)
+                np.linspace(0, 7180, 360) + 1997.3794084376191)
 
     if salience.ndim == 1:
         if center is None:

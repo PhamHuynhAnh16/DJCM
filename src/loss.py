@@ -29,10 +29,6 @@ def ce(input, target, weight=None):
 
 
 def bce(input, target, weight=None):
-    min_len = min(inputs.size(1), targets.size(1))
-    inputs = inputs[:, :min_len, :]
-    targets = targets[:, :min_len, :]
-
     bce = nn.BCELoss(reduce=False)
     loss = bce(input, target)
     if weight is not None:

@@ -49,7 +49,7 @@ def evaluate(dataset, model, batch_size, hop_length, seq_l, device, path=None, p
         freqs = np.array([10 * (2 ** (cent / 1200)) if cent else 0 for cent in cents])
         freqs_pred = np.array([10 * (2 ** (cent / 1200)) if cent else 0 for cent in cents_pred])
 
-        time_slice = np.array([i * hop_length * 1000 / SAMPLE_RATE for i in range(len(freqs))])
+        time_slice = np.array([i * hop_length / SAMPLE_RATE for i in range(len(freqs))])
         ref_v, ref_c, est_v, est_c = to_cent_voicing(time_slice, freqs, time_slice, freqs_pred)
         rpa = raw_pitch_accuracy(ref_v, ref_c, est_v, est_c)
         rca = raw_chroma_accuracy(ref_v, ref_c, est_v, est_c)
