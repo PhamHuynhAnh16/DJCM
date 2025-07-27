@@ -37,6 +37,10 @@ def bce(input, target, weight=None):
 
 
 def FL(inputs, targets, alpha, gamma, weight_t=None):
+    min_len = min(inputs.size(1), targets.size(1))
+    inputs = inputs[:, :min_len, :]
+    targets = targets[:, :min_len, :]
+
     loss = F.binary_cross_entropy(inputs, targets, reduce=False)
     weight = torch.ones(inputs.shape, dtype=torch.float).to(inputs.device)
     weight[targets == 1] = float(alpha)

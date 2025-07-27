@@ -12,8 +12,8 @@ for k, v in model.state_dict().items():
     name = k.replace("module.", "")
     new_state_dict[name] = v
 
-del new_state_dict["to_wav.istft.ola_window"], new_state_dict["to_wav.istft.conv_real.weight"], new_state_dict["to_wav.istft.conv_imag.weight"]
-del new_state_dict["to_spec.stft.conv_real.weight"], new_state_dict["to_spec.stft.conv_imag.weight"]
+# del new_state_dict["to_wav.istft.ola_window"], new_state_dict["to_wav.istft.conv_real.weight"], new_state_dict["to_wav.istft.conv_imag.weight"]
+# del new_state_dict["to_spec.stft.conv_real.weight"], new_state_dict["to_spec.stft.conv_imag.weight"]
 
 torch.save(new_state_dict, output_path)
 
