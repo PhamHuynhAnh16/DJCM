@@ -6,6 +6,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
+from scipy.signal import medfilt
 from einops.layers.torch import Rearrange
 
 SAMPLE_RATE, WINDOW_LENGTH, N_CLASS, HOP_SIZE = 16000, 2048, 360, 160
@@ -31,24 +32,25 @@ class BiGRU(nn.Module):
     A bidirectional GRU layer.
 
     Args:
-        image_size (tuple): Image Height and Width Values.
         patch_size (tuple): Patch Height and Width Values.
         channels (int): Number of channels.
         depth (int): Number of depths.
     """
 
-    def __init__(self, image_size, patch_size, channels, depth):
+    def __init__(self, patch_size, channels, depth):
         super(BiGRU, self).__init__()
-        image_width, image_height = image_size
         patch_width, patch_height = patch_size
-        assert image_height % patch_height == 0 and image_width % patch_width == 0
         patch_dim = channels * patch_height * patch_width
         self.to_patch_embedding = nn.Sequential(Rearrange('b c (w p1) (h p2) -> b (w h) (p1 p2 c)', p1=patch_width, p2=patch_height))
         self.gru = nn.GRU(patch_dim, patch_dim // 2, num_layers=depth, batch_first=True, bidirectional=True)
 
     def forward(self, x):
         x = self.to_patch_embedding(x)
-        return self.gru(x)[0]
+        try:
+            return self.gru(x)[0]
+        except:
+            torch.backends.cudnn.enabled = False
+            return self.gru(x)[0]
 
 class ResConvBlock(nn.Module):
     """
@@ -57,17 +59,16 @@ class ResConvBlock(nn.Module):
     Args:
         in_planes (int): Number of input planes.
         out_planes (int): Number of output planes.
-        bias (bool, optional): Adds a learnable bias to the output
     """
 
-    def __init__(self, in_planes, out_planes, bias=False):
+    def __init__(self, in_planes, out_planes):
         super(ResConvBlock, self).__init__()
         self.bn1 = nn.BatchNorm2d(in_planes, momentum=0.01)
         self.bn2 = nn.BatchNorm2d(out_planes, momentum=0.01)
         self.act1 = nn.PReLU()
         self.act2 = nn.PReLU()
-        self.conv1 = nn.Conv2d(in_planes, out_planes, (3, 3), padding=(1, 1), bias=bias)
-        self.conv2 = nn.Conv2d(out_planes, out_planes, (3, 3), padding=(1, 1), bias=bias)
+        self.conv1 = nn.Conv2d(in_planes, out_planes, (3, 3), padding=(1, 1), bias=False)
+        self.conv2 = nn.Conv2d(out_planes, out_planes, (3, 3), padding=(1, 1), bias=False)
         self.is_shortcut = False
 
         if in_planes != out_planes:
@@ -99,14 +100,13 @@ class ResEncoderBlock(nn.Module):
         out_channels (int): Number of output channels.
         n_blocks (int): Number of convolutional blocks in the block.
         kernel_size (tuple): Size of the average pooling kernel.
-        bias (bool): Adds a learnable bias to the output.
     """
 
-    def __init__(self, in_channels, out_channels, n_blocks, kernel_size, bias):
+    def __init__(self, in_channels, out_channels, n_blocks, kernel_size):
         super(ResEncoderBlock, self).__init__()
-        self.conv = nn.ModuleList([ResConvBlock(in_channels, out_channels, bias)])
+        self.conv = nn.ModuleList([ResConvBlock(in_channels, out_channels)])
         for _ in range(n_blocks - 1):
-            self.conv.append(ResConvBlock(out_channels, out_channels, bias))
+            self.conv.append(ResConvBlock(out_channels, out_channels))
 
         self.pool = nn.MaxPool2d(kernel_size) if kernel_size is not None else None
 
@@ -126,24 +126,16 @@ class ResDecoderBlock(nn.Module):
         out_channels (int): Number of output channels.
         n_blocks (int): Number of convolutional blocks in the block.
         stride (tuple): Stride for transposed convolution.
-        bias (bool): Adds a learnable bias to the output.
-        gate (bool): Enable gated attention on skip connection before concatenation.
     """
 
-    def __init__(self, in_channels, out_channels, n_blocks, stride, bias, gate=False):
+    def __init__(self, in_channels, out_channels, n_blocks, stride):
         super(ResDecoderBlock, self).__init__()
-        self.gate = gate
-        if self.gate:
-            self.W_g = nn.Sequential(nn.Conv2d(out_channels, out_channels // 2, (1, 1)), nn.BatchNorm2d(out_channels // 2))
-            self.W_x = nn.Sequential(nn.Conv2d(out_channels, out_channels // 2, (1, 1)), nn.BatchNorm2d(out_channels // 2))
-            self.psi = nn.Sequential(nn.Conv2d(out_channels // 2, 1, (1, 1)), nn.BatchNorm2d(1), nn.Sigmoid())
-
-        self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, stride, stride, (0, 0), bias=bias)
+        self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, stride, stride, (0, 0), bias=False)
         self.bn1 = nn.BatchNorm2d(in_channels, momentum=0.01)
-        self.conv = nn.ModuleList([ResConvBlock(out_channels * 2, out_channels, bias)])
+        self.conv = nn.ModuleList([ResConvBlock(out_channels * 2, out_channels)])
 
         for _ in range(n_blocks - 1):
-            self.conv.append(ResConvBlock(out_channels, out_channels, bias))
+            self.conv.append(ResConvBlock(out_channels, out_channels))
 
         self.init_weights()
 
@@ -153,14 +145,13 @@ class ResDecoderBlock(nn.Module):
 
     def forward(self, x, concat):
         x = self.conv1(F.relu_(self.bn1(x)))
-        if self.gate: concat = x * self.psi(F.relu_(self.W_g(x) + self.W_x(concat)))
         x = torch.cat((x, concat), dim=1)
     
         for each_layer in self.conv:
             x = each_layer(x)
     
         return x
-
+    
 class Encoder(nn.Module):
     """
     The encoder part.
@@ -172,7 +163,14 @@ class Encoder(nn.Module):
 
     def __init__(self, in_channels, n_blocks):
         super(Encoder, self).__init__()
-        self.en_blocks = nn.ModuleList([ResEncoderBlock(in_channels, 32, n_blocks, (1, 2), False), ResEncoderBlock(32, 64, n_blocks, (1, 2), False), ResEncoderBlock(64, 128, n_blocks, (1, 2), False), ResEncoderBlock(128, 256, n_blocks, (1, 2), False), ResEncoderBlock(256, 384, n_blocks, (1, 2), False), ResEncoderBlock(384, 384, n_blocks, (1, 2), False)])
+        self.en_blocks = nn.ModuleList([
+            ResEncoderBlock(in_channels, 32, n_blocks, (1, 2)), 
+            ResEncoderBlock(32, 64, n_blocks, (1, 2)), 
+            ResEncoderBlock(64, 128, n_blocks, (1, 2)), 
+            ResEncoderBlock(128, 256, n_blocks, (1, 2)), 
+            ResEncoderBlock(256, 384, n_blocks, (1, 2)), 
+            ResEncoderBlock(384, 384, n_blocks, (1, 2))
+        ])
 
     def forward(self, x):
         concat_tensors = []
@@ -189,12 +187,18 @@ class Decoder(nn.Module):
 
     Args:
         n_blocks (int): Number of convolutional blocks in each encoder block.
-        gate (bool): Enable gated attention on skip connection before concatenation.
     """
 
-    def __init__(self, n_blocks, gate=False):
+    def __init__(self, n_blocks):
         super(Decoder, self).__init__()
-        self.de_blocks = nn.ModuleList([ResDecoderBlock(384, 384, n_blocks, (1, 2), False, gate), ResDecoderBlock(384, 384, n_blocks, (1, 2), False, gate), ResDecoderBlock(384, 256, n_blocks, (1, 2), False, gate), ResDecoderBlock(256, 128, n_blocks, (1, 2), False, gate), ResDecoderBlock(128, 64, n_blocks, (1, 2), False, gate), ResDecoderBlock(64, 32, n_blocks, (1, 2), False, gate)])
+        self.de_blocks = nn.ModuleList([
+            ResDecoderBlock(384, 384, n_blocks, (1, 2)), 
+            ResDecoderBlock(384, 384, n_blocks, (1, 2)), 
+            ResDecoderBlock(384, 256, n_blocks, (1, 2)), 
+            ResDecoderBlock(256, 128, n_blocks, (1, 2)), 
+            ResDecoderBlock(128, 64, n_blocks, (1, 2)), 
+            ResDecoderBlock(64, 32, n_blocks, (1, 2))
+        ])
 
     def forward(self, x, concat_tensors):
         for i, layer in enumerate(self.de_blocks):
@@ -213,7 +217,10 @@ class LatentBlocks(nn.Module):
 
     def __init__(self, n_blocks, latent_layers):
         super(LatentBlocks, self).__init__()
-        self.latent_blocks = nn.ModuleList([ResEncoderBlock(384, 384, n_blocks, None, False) for _ in range(latent_layers)])
+        self.latent_blocks = nn.ModuleList([
+            ResEncoderBlock(384, 384, n_blocks, None) 
+            for _ in range(latent_layers)
+        ])
 
     def forward(self, x):
         for layer in self.latent_blocks:
@@ -228,13 +235,12 @@ class SVS_Decoder(nn.Module):
     Args:
         in_channels (int):Number of input channels.
         n_blocks (int): Number of sub-blocks used in each decoder block.
-        gate (bool): Enable gated attention on skip connection before concatenation.
     """
 
-    def __init__(self, in_channels, n_blocks, gate=False):
+    def __init__(self, in_channels, n_blocks):
         super(SVS_Decoder, self).__init__()
-        self.de_blocks = Decoder(n_blocks, gate)
-        self.after_conv1 = ResEncoderBlock(32, 32, n_blocks, None, False)
+        self.de_blocks = Decoder(n_blocks)
+        self.after_conv1 = ResEncoderBlock(32, 32, n_blocks, None)
         self.after_conv2 = nn.Conv2d(32, in_channels * 4, (1, 1))
         self.init_weights()
 
@@ -250,17 +256,15 @@ class PE_Decoder(nn.Module):
 
     Args:
         n_blocks (int): Number of sub-blocks used in each decoder block.
-        seq_frames (int): Number of time frames per input sequence for GRU.
         seq_layers (int, optional): Number of GRU layers.
-        gate (bool): Whether to use gating mechanisms in the decoder.
     """
 
-    def __init__(self, n_blocks, seq_frames, seq_layers=1, gate=False):
+    def __init__(self, n_blocks, seq_layers=1):
         super(PE_Decoder, self).__init__()
-        self.de_blocks = Decoder(n_blocks, gate)
-        self.after_conv1 = ResEncoderBlock(32, 32, n_blocks, None, False)
+        self.de_blocks = Decoder(n_blocks)
+        self.after_conv1 = ResEncoderBlock(32, 32, n_blocks, None)
         self.after_conv2 = nn.Conv2d(32, 1, (1, 1))
-        self.fc = nn.Sequential(BiGRU((seq_frames, 1024), (1, 1024), 1, seq_layers), nn.Linear(1024, N_CLASS), nn.Sigmoid())
+        self.fc = nn.Sequential(BiGRU((1, WINDOW_LENGTH // 2), 1, seq_layers), nn.Linear(WINDOW_LENGTH // 2, N_CLASS), nn.Sigmoid())
         init_layer(self.after_conv2)
 
     def forward(self, x, concat_tensors):
@@ -287,28 +291,27 @@ class Wav2Spec(nn.Module):
 
         bs, c, segment_samples = audio.shape
         audio = audio.reshape(bs * c, segment_samples)
-        stft_out = torch.stft(audio, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.window_size, window=self.window, return_complex=True, center=True, pad_mode='reflect')
 
-        mag = torch.abs(stft_out).permute(0, 2, 1)
-        mag = mag.reshape(bs, c, mag.shape[1], mag.shape[2])
+        fft = torch.stft(audio, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.window_size, window=self.window, center=True, return_complex=True, pad_mode='reflect')
+        magnitude = torch.sqrt(fft.real.pow(2) + fft.imag.pow(2))
 
-        return mag
+        return magnitude.unsqueeze(1).transpose(2, 3)
 
 class DJCM(nn.Module):
-    def __init__(self, in_channels, n_blocks, hop_length, latent_layers, seq_frames, gate=False, seq_layers=1):
+    def __init__(self, in_channels, n_blocks, latent_layers):
         super(DJCM, self).__init__()
-        self.to_spec = Wav2Spec(int(hop_length / 1000 * SAMPLE_RATE), WINDOW_LENGTH)
         self.bn = nn.BatchNorm2d(WINDOW_LENGTH // 2 + 1, momentum=0.01)
         self.svs_encoder = Encoder(in_channels, n_blocks)
         self.svs_latent = LatentBlocks(n_blocks, latent_layers)
-        self.svs_decoder = SVS_Decoder(in_channels, n_blocks, gate)
+        self.svs_decoder = SVS_Decoder(in_channels, n_blocks)
         self.pe_encoder = Encoder(in_channels, n_blocks)
         self.pe_latent = LatentBlocks(n_blocks, latent_layers)
-        self.pe_decoder = PE_Decoder(n_blocks, seq_frames, seq_layers, gate)
+        self.pe_decoder = PE_Decoder(n_blocks)
+        self.to_spec = Wav2Spec(HOP_SIZE, WINDOW_LENGTH)
         init_bn(self.bn)
 
     def spec(self, x, spec_m):
-        # # Spec2Wav shortcode keeps only out_spec
+        # Spec2Wav shortcode keeps only out_spec
 
         bs, c, time_steps, freqs_steps = x.shape
         x = x.reshape(bs, c // 4, 4, time_steps, freqs_steps)
@@ -326,11 +329,11 @@ class DJCM(nn.Module):
         # x, concat_tensors = self.pe_encoder(self.bn(spec_m.transpose(1, 3)).transpose(1, 3)[..., :-1])
         # pe_out = self.pe_decoder(self.pe_latent(x), concat_tensors)
 
-        spec_m = self.to_spec(audio)
-        x, concat_tensors = self.svs_encoder(self.bn(spec_m.transpose(1, 3)).transpose(1, 3)[..., :-1])
+        spec = self.to_spec(audio)
+        x, concat_tensors = self.svs_encoder(self.bn(spec.transpose(1, 3)).transpose(1, 3)[..., :-1])
         x = self.svs_decoder(self.svs_latent(x), concat_tensors)
     
-        out_spec = self.spec(F.pad(x, pad=(0, 1)), spec_m)[..., :-1]
+        out_spec = self.spec(F.pad(x, pad=(0, 1)), spec)[..., :-1]
         x, concat_tensors = self.pe_encoder(out_spec)
         pe_out = self.pe_decoder(self.pe_latent(x), concat_tensors)
 
@@ -346,10 +349,14 @@ class DJCM_Inference:
         is_half (bool, optional): Use Half to save resources and speed up.
         onnx (bool, optional): Using the ONNX model.
         providers (list, optional): Providers of onnx model. default is CPUExecutionProvider.
+        batch_size (int, optional): .
+        segment_len (float, optional): .
     """
 
-    def __init__(self, model_path, device = "cpu", is_half = False, onnx = False, providers = ["CPUExecutionProvider"]):
+    def __init__(self, model_path, device = "cpu", is_half = False, onnx = False, providers = ["CPUExecutionProvider"], batch_size = 1, segment_len = 5.12):
+        super(DJCM_Inference, self).__init__()
         self.onnx = onnx
+
         if self.onnx:
             import onnxruntime as ort
 
@@ -357,13 +364,16 @@ class DJCM_Inference:
             sess_options.log_severity_level = 3
             self.model = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
         else:
-            model = DJCM(1, 1, 10, 1, SAMPLE_RATE // 10)
+            model = DJCM(1, 1, 1)
             model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
             model = model.to(device).eval()
             self.model = model.half() if is_half else model.float()
 
-        self.device = device
+        self.batch_size = batch_size
+        self.seg_len = int(segment_len * SAMPLE_RATE)
+        self.seg_frames = int(self.seg_len // HOP_SIZE)
         self.is_half = is_half
+        self.device = device
 
         # get this part from RMVPE
         cents_mapping = 20 * np.arange(N_CLASS) + 1997.3794084376191
@@ -374,24 +384,54 @@ class DJCM_Inference:
         Convert audio frequency to hidden representation.
 
         Args:
-            audio (np.ndarray): Audio features.
+            audio (torch.Tensor): Audio features.
+        """
+
+        if self.onnx:
+            hidden = torch.as_tensor(
+                self.model.run([self.model.get_outputs()[0].name], {self.model.get_inputs()[0].name: audio.cpu().numpy().astype(np.float32)})[0], device=self.device
+            )
+        else:
+            hidden = self.model(
+                audio.half() if self.is_half else audio.float()
+            )
+
+        return hidden
+
+    def infer_from_audio(self, audio, thred=0.03):
+        """
+        Infers F0 from audio.
+
+        Args:
+            audio (np.ndarray): Audio signal.
+            thred (float, optional): Threshold for salience. Defaults to 0.03.
         """
 
         with torch.inference_mode():
-            audio = torch.from_numpy(audio).to(self.device)
-            audio = audio.unsqueeze(0) if audio.dim() == 1 else audio
-            audio = audio.unsqueeze(1)
+            padded_audio = self.pad_audio(audio)
+            hidden = self.inference(padded_audio)[:(audio.shape[-1] // HOP_SIZE + 1)]
 
-            if self.onnx:
-                pitch_pred = torch.as_tensor(
-                    self.model.run([self.model.get_outputs()[0].name], {self.model.get_inputs()[0].name: audio.cpu().numpy().astype(np.float32)})[0], 
-                    device=self.device
-                )
-            else:
-                pitch_pred = self.model(audio.half() if self.is_half else audio.float())
+            f0 = self.decode(hidden.squeeze(0).cpu().numpy(), thred)
+            f0 = medfilt(f0, kernel_size=3)
 
-            return pitch_pred
-    
+            return f0
+        
+    def infer_from_audio_with_pitch(self, audio, thred=0.03, f0_min=50, f0_max=1100):
+        """
+        Infers F0 from audio with pitch.
+
+        Args:
+            audio (np.ndarray): Audio signal.
+            thred (float, optional): Threshold for salience. Defaults to 0.03.
+            f0_min (float, int, optional): Minimum F0 threshold.
+            f0_max (float, int, optional): Maximum F0 threshold.
+        """
+
+        f0 = self.infer_from_audio(audio, thred)
+        f0[(f0 < f0_min) | (f0 > f0_max)] = 0
+
+        return f0
+
     def to_local_average_cents(self, salience, thred=0.05):
         """
         Converts salience to local average cents.
@@ -433,101 +473,35 @@ class DJCM_Inference:
         f0 = 10 * (2 ** (cents_pred / 1200))
         f0[f0 == 10] = 0
         return f0
-    
-    def infer_from_audio(self, audio, thred=0.03):
-        """
-        Infers F0 from audio.
 
-        Args:
-            audio (np.ndarray): Audio signal.
-            thred (float, optional): Threshold for salience. Defaults to 0.03.
-        """
+    def pad_audio(self, audio):
+        audio_len = audio.shape[-1]
 
-        segment_len, overlap = int(16000 * 5), int(16000 * 2.5) # 5 seconds and 2.5 seconds
-        segment_hop = segment_len - overlap
-        f0_out, weight_out, pos_out = [], [], []
+        seg_nums = int(np.ceil(audio_len / self.seg_len)) + 1
+        pad_len = int(seg_nums * self.seg_len - audio_len + self.seg_len // 2)
 
-        total_samples = len(audio)
-        for start in range(0, total_samples, segment_hop):
-            end = min(start + segment_len, total_samples)
-            segment = audio[start:end]
+        left_pad = np.zeros(int(self.seg_len // 4), dtype=np.float32)
+        right_pad = np.zeros(int(pad_len - self.seg_len // 4), dtype=np.float32)
+        padded_audio = np.concatenate([left_pad, audio, right_pad], axis=-1)
 
-            if len(segment) < 1024: continue
+        segments = [padded_audio[start: start + int(self.seg_len)] for start in range(0, len(padded_audio) - int(self.seg_len) + 1, int(self.seg_len // 2))]
+        segments = np.stack(segments, axis=0)
+        segments = torch.from_numpy(segments).unsqueeze(1).to(self.device)
 
-            pitch_pred = self.audio2hidden(segment)
-            f0_seg = self.decode(pitch_pred.squeeze(0).cpu().numpy(), thred)
+        return segments
 
-            f_len = len(f0_seg)
-            weight = np.ones(f_len)
+    def inference(self, segments):
+        hidden_segments = torch.cat([
+            self.audio2hidden(segments[i:i + self.batch_size]) 
+            for i in range(0, len(segments), self.batch_size)
+        ], dim=0)
 
-            fade_len = int(overlap / HOP_SIZE)
-            fade_len = min(fade_len, f_len // 2)
+        hidden = torch.cat([
+            seg[self.seg_frames // 4: int(self.seg_frames * 0.75)]
+            for seg in hidden_segments
+        ], dim=0)
 
-            if start != 0: weight[:fade_len] = np.linspace(0, 1, fade_len)
-            if end != total_samples: weight[-fade_len:] = np.linspace(1, 0, fade_len)
-
-            f0_out.append(f0_seg * weight)
-            weight_out.append(weight)
-            pos_out.append(int(start / HOP_SIZE))
-
-        total_f0 = np.zeros((total_samples // HOP_SIZE) + 1)
-        total_weight = np.zeros_like(total_f0)
-
-        for f0, w, pos in zip(f0_out, weight_out, pos_out):
-            total_f0[pos: pos + len(f0)] += f0
-            total_weight[pos:pos + len(w)] += w
-
-        result = total_f0 / (total_weight + 1e-8)
-        return result
-    
-    def infer_from_audio_with_pitch(self, audio, thred=0.03, f0_min=50, f0_max=1100):
-        """
-        Infers F0 from audio with pitch.
-
-        Args:
-            audio (np.ndarray): Audio signal.
-            thred (float, optional): Threshold for salience. Defaults to 0.03.
-            f0_min (float, int, optional): Minimum F0 threshold.
-            f0_max (float, int, optional): Maximum F0 threshold.
-        """
-
-        segment_len, overlap = int(SAMPLE_RATE * 15), int(SAMPLE_RATE * 7.5) # 15 seconds and 7.5 seconds
-        segment_hop = segment_len - overlap
-        f0_out, weight_out, pos_out = [], [], []
-
-        total_samples = len(audio)
-        for start in range(0, total_samples, segment_hop):
-            end = min(start + segment_len, total_samples)
-            segment = audio[start:end]
-
-            if len(segment) < 1024: continue
-
-            pitch_pred = self.audio2hidden(segment)
-            f0_seg = self.decode(pitch_pred.squeeze(0).cpu().numpy(), thred)
-            f0_seg[(f0_seg < f0_min) | (f0_seg > f0_max)] = 0 
-
-            f_len = len(f0_seg)
-            weight = np.ones(f_len)
-
-            fade_len = int(overlap / HOP_SIZE)
-            fade_len = min(fade_len, f_len // 2)
-
-            if start != 0: weight[:fade_len] = np.linspace(0, 1, fade_len)
-            if end != total_samples: weight[-fade_len:] = np.linspace(1, 0, fade_len)
-
-            f0_out.append(f0_seg * weight)
-            weight_out.append(weight)
-            pos_out.append(int(start / HOP_SIZE))
-
-        total_f0 = np.zeros((total_samples // HOP_SIZE) + 1)
-        total_weight = np.zeros_like(total_f0)
-
-        for f0, w, pos in zip(f0_out, weight_out, pos_out):
-            total_f0[pos: pos + len(f0)] += f0
-            total_weight[pos:pos + len(w)] += w
-
-        result = total_f0 / (total_weight + 1e-8)
-        return result
+        return hidden
 
 if __name__ == "__main__":
     import librosa
@@ -537,7 +511,7 @@ if __name__ == "__main__":
 
     # https://huggingface.co/AnhP/DJCM-Test/resolve/main/djcm.pt
 
-    model = DJCM_Inference(r"F:\github\djcm.pt", device="cpu")
+    model = DJCM_Inference(r"G:\Assets\DJCM-Model\djcm.pt", device="cpu")
     f0 = model.infer_from_audio(y, thred=0.03)
 
     with open("f0-djcm.txt", "w") as f:

@@ -26,7 +26,7 @@ def forward(self, audio):
 
     return mag
 
-model = DJCM(1, 1, 10, 1, 16000 // 10)
+model = DJCM(1, 1, 1)
 # Replace forward in to_spec
 model.to_spec.forward = types.MethodType(forward, model.to_spec)
 
