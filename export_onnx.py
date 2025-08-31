@@ -5,54 +5,47 @@ import torch
 import onnxsim
 import onnxconverter_common
 
-from inference import DJCM
+from src.model import DJCM
+from src.spec import Spectrogram
+from src.constants import WINDOW_LENGTH
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_path = "djcm.pt"
 output_path = "djcm.onnx"
 fp16_model = True
 
-# ONNX does not support ComplexFloat
+in_channels = 1
+n_blocks = 1
+latent_layers = 1
+hop_length = 160
 
-def forward(self, audio):
-    # Replaced torchlibrosa module with torch.stft.
+spec_extractor = Spectrogram(hop_length, WINDOW_LENGTH).to(device)
 
-    bs, c, segment_samples = audio.shape
-    audio = audio.reshape(bs * c, segment_samples)
-    stft_out = torch.stft(audio, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.window_size, window=self.window, return_complex=False, center=True, pad_mode='reflect')
-
-    # mag = torch.abs(stft_out).permute(0, 2, 1)
-    mag = torch.sqrt(stft_out[..., 0]**2 + stft_out[..., 1]**2 + 1e-9).permute(0, 2, 1)
-    mag = mag.reshape(bs, c, mag.shape[1], mag.shape[2])
-
-    return mag
-
-model = DJCM(1, 1, 10, 1, 16000 // 10)
-# Replace forward in to_spec
-model.to_spec.forward = types.MethodType(forward, model.to_spec)
-
+model = DJCM(in_channels or 1, n_blocks or 1, latent_layers or 1)
 model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
-model = model.to("cpu").eval()
+model = model.to(device).eval()
 
-waveform = torch.randn(1, 1, 16384, dtype=torch.float32, device="cpu").clip(min=-1., max=1.)
+waveform = torch.randn(1, 1, 16384, dtype=torch.float32, device=device).clip(min=-1., max=1.)
+spec = spec_extractor(waveform)
 
 # Export the model
 
 torch.onnx.export(
     model,
     (
-        waveform,
+        spec,
     ),
     output_path,
     do_constant_folding=True, 
     verbose=False, 
     input_names=[
-        'audio',
+        'spec',
     ],
     output_names=[
         'f0'
     ],
     dynamic_axes={
-        'audio': [2],
+        'spec': [2],
         'f0': [1]
     },
 )

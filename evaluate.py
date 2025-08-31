@@ -1,48 +1,107 @@
-import os
+import torch
 
 import numpy as np
-import pandas as pd
-import torch
-from tqdm import tqdm
-
-from collections import defaultdict
-import soundfile as sf
 import torch.nn.functional as F
-from src import to_local_average_cents, Inference
-from mir_eval.melody import raw_pitch_accuracy, to_cent_voicing, overall_accuracy, raw_chroma_accuracy
+
+from tqdm import tqdm
+from collections import defaultdict
 from mir_eval.melody import voicing_false_alarm, voicing_recall
-from src import SAMPLE_RATE
+from mir_eval.melody import raw_pitch_accuracy, to_cent_voicing, overall_accuracy, raw_chroma_accuracy
 
+from src.spec import Spectrogram
+from src.constants import SAMPLE_RATE, WINDOW_LENGTH, CONST
 
-def calculate_sdr(ref, est):
-    s_true = ref
-    s_artif = est - ref
-    sdr = 10.0 * (
-        torch.log10(torch.clip(torch.mean(s_true ** 2), 1e-8))
-        - torch.log10(torch.clip(torch.mean(s_artif ** 2), 1e-8))
-    )
-    return sdr
+class Inference:
+    def __init__(self, model, seg_len, seg_frames, hop_length, batch_size, device):
+        super(Inference, self).__init__()
+        self.model = model.eval()
+        self.seg_len = seg_len
+        self.seg_frames = seg_frames
+        self.batch_size = batch_size
+        self.hop_length = hop_length
+        self.device = device
+        self.spec_extractor = Spectrogram(hop_length, WINDOW_LENGTH).to(device)
 
+    def inference(self, audio):
+        with torch.no_grad():
+            if torch.is_tensor(audio): audio = audio.cpu().numpy()
+            if audio.ndim > 1: audio = audio.squeeze()
 
-def evaluate(dataset, model, batch_size, hop_length, seq_l, device, path=None, pitch_th=0.5):
+            padded_audio = self.pad_audio(audio)
+            hidden = self.infer(padded_audio)[:(audio.shape[-1] // self.hop_length + 1)]
+
+            return hidden
+
+    def pad_audio(self, audio):
+        audio_len = audio.shape[-1]
+
+        seg_nums = int(np.ceil(audio_len / self.seg_len)) + 1
+        pad_len = int(seg_nums * self.seg_len - audio_len + self.seg_len // 2)
+
+        left_pad = np.zeros(int(self.seg_len // 4), dtype=np.float32)
+        right_pad = np.zeros(int(pad_len - self.seg_len // 4), dtype=np.float32)
+        padded_audio = np.concatenate([left_pad, audio, right_pad], axis=-1)
+
+        segments = [padded_audio[start: start + int(self.seg_len)] for start in range(0, len(padded_audio) - int(self.seg_len) + 1, int(self.seg_len // 2))]
+        segments = np.stack(segments, axis=0)
+        segments = torch.from_numpy(segments).unsqueeze(1).to(self.device)
+
+        return segments
+
+    def infer(self, segments):
+        hidden_segments = torch.cat([
+            self.model(self.spec_extractor(segments[i:i + self.batch_size])) # [:, :-1, :] 
+            for i in range(0, len(segments), self.batch_size)
+        ], dim=0)
+
+        hidden = torch.cat([
+            seg[self.seg_frames // 4: int(self.seg_frames * 0.75)]
+            for seg in hidden_segments
+        ], dim=0)
+
+        return hidden
+    
+def to_local_average_cents(salience, center=None, thred=0.0):
+    """
+    find the weighted average cents near the argmax bin
+    """
+
+    if not hasattr(to_local_average_cents, 'cents_mapping'):
+        to_local_average_cents.cents_mapping = (np.linspace(0, 7180, 360) + CONST)
+
+    if salience.ndim == 1:
+        if center is None:
+            center = int(np.argmax(salience))
+
+        start = max(0, center - 4)
+        end = min(len(salience), center + 5)
+
+        salience = salience[start:end]
+        product_sum = np.sum(salience * to_local_average_cents.cents_mapping[start:end])
+        weight_sum = np.sum(salience)
+
+        return product_sum / weight_sum if np.max(salience) > thred else 0
+    
+    if salience.ndim == 2:
+        return np.array([to_local_average_cents(salience[i, :], None, thred) for i in range(salience.shape[0])])
+
+    raise Exception("label should be either 1d or 2d ndarray")
+
+def evaluate(dataset, model, batch_size, hop_length, seq_l, device, pitch_th=0.5):
     metrics = defaultdict(list)
     seq_l = int(seq_l * SAMPLE_RATE)
-    hop_length = int(hop_length / 1000 * SAMPLE_RATE)
+
     seg_frames = seq_l // hop_length
     infer = Inference(model, seq_l, seg_frames, hop_length, batch_size, device)
 
     for data in tqdm(dataset):
         audio_m = data['audio_m'].to(device)
-        audio_v = data['audio_v'].to(device)
         pitch_label = data['pitch'].to(device)
 
         pitch_pred = infer.inference(audio_m)
-        # loss_svs = F.l1_loss(audio_v_pred, audio_v)
         loss_pitch = F.binary_cross_entropy(pitch_pred, pitch_label)
-        # loss = loss_svs + loss_pitch
-        # metrics['loss_svs'].append(loss_svs.item())
+
         metrics['loss_pe'].append(loss_pitch.item())
-        # metrics['loss_total'].append(loss.item())
 
         cents = to_local_average_cents(pitch_label.detach().cpu().numpy(), None, pitch_th)
         cents_pred = to_local_average_cents(pitch_pred.detach().cpu().numpy(), None, pitch_th)
@@ -51,6 +110,7 @@ def evaluate(dataset, model, batch_size, hop_length, seq_l, device, path=None, p
 
         time_slice = np.array([i * hop_length / SAMPLE_RATE for i in range(len(freqs))])
         ref_v, ref_c, est_v, est_c = to_cent_voicing(time_slice, freqs, time_slice, freqs_pred)
+
         rpa = raw_pitch_accuracy(ref_v, ref_c, est_v, est_c)
         rca = raw_chroma_accuracy(ref_v, ref_c, est_v, est_c)
         oa = overall_accuracy(ref_v, ref_c, est_v, est_c)
@@ -63,20 +123,6 @@ def evaluate(dataset, model, batch_size, hop_length, seq_l, device, path=None, p
         metrics['VFA'].append(vfa)
         metrics['VR'].append(vr)
 
-        if path is not None:
-            # sf.write(os.path.join(path, data['file'].replace('_v.wav', '.wav')), audio_v_pred.cpu().numpy(),
-                    #  samplerate=16000)
-            df_pitch = pd.DataFrame(columns=['times', 'freqs', 'confi'])
-            df_pitch['times'] = time_slice
-            df_pitch['freqs'] = freqs_pred
-            df_pitch['confi'] = torch.max(pitch_pred, dim=-1).values.numpy()
-            df_pitch.to_csv(os.path.join(path, data['file'].replace('_v.wav', '.csv')), index=False)
-        # sdr = calculate_sdr(audio_v, audio_v_pred).item()
-        # sdr1 = calculate_sdr(audio_v, audio_m).item()
-        # metrics['SDR'].append(sdr)
-        # metrics['NSDR'].append(sdr - sdr1)
-        # metrics['NSDR_W'].append(len(audio_v) * (sdr - sdr1))
-        # metrics['LENGTH'].append(len(audio_v))
-        # print(sdr, '\t', rpa, '\t', rca)
+        print(rpa, '\t', rca)
 
     return metrics
