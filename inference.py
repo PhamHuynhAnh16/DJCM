@@ -34,7 +34,7 @@ class DJCM_Inference:
         # onnx = False, 
         providers = ["CPUExecutionProvider"], 
         batch_size = 1, 
-        hop_length = 160,
+        hop_length = 320,
         segment_len = 5.12,
         in_channels = 1, 
         n_blocks = 1, 

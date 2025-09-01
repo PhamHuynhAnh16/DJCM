@@ -17,7 +17,7 @@ fp16_model = True
 in_channels = 1
 n_blocks = 1
 latent_layers = 1
-hop_length = 160
+hop_length = 320
 
 spec_extractor = Spectrogram(hop_length, WINDOW_LENGTH).to(device)
 

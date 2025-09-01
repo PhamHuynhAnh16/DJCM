@@ -14,8 +14,8 @@ from torch.utils.tensorboard import SummaryWriter
 now_dir = os.getcwd()
 sys.path.append(now_dir)
 
+from src.loss import FL
 from src.model import DJCM
-from src.loss import FL, bce
 from src.dataset import MIR1K
 from evaluate import evaluate
 from src.utils import summary, cycle
@@ -30,16 +30,15 @@ def train():
     latent_layers = 1
 
     seq_l = 2.56
-    hop_length = 160
+    hop_length = 320
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    loss_mode = "FL"
     logdir = 'runs/MIR1K_Cascade'
     dataset_path = "/kaggle/working/dataset"
 
     pitch_th = 0.08
     learning_rate = 5e-4
-    batch_size = 4
+    batch_size = 16
     clip_grad_norm = 3
 
     iterations = 100000
@@ -87,12 +86,7 @@ def train():
         pitch_label = data['pitch'].to(device)
 
         out_pitch = model(spec) # [:, :-1, :]
-
-        if loss_mode == "FL":
-            loss_pitch = FL(out_pitch, pitch_label, alpha, gamma)
-        else:
-            loss_pitch = bce(out_pitch, pitch_label)
-
+        loss_pitch = FL(out_pitch, pitch_label, alpha, gamma)
         loss_total = weight_pe * loss_pitch
 
         optimizer.zero_grad()

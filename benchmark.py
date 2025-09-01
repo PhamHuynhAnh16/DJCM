@@ -16,7 +16,7 @@ if __name__ == "__main__":
     latent_layers = 1
 
     seq_l = 2.56
-    hop_length = 160
+    hop_length = 320
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model_path = "djcm.pt"
